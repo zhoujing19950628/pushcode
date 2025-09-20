@@ -1,0 +1,55 @@
+# 监控时间窗口设置
+time_window_seconds: 60
+sampling_interval_seconds: 2
+cooldown_period_seconds: 120
+
+# 指标评估规则
+metrics:
+  memory_usage:
+    enabled: true
+    warning_threshold: 0.90
+    critical_threshold: 0.95
+    warning_score: 15
+    critical_score: 25
+
+  cache_performance:
+    enabled: true
+    warning_threshold: 0.90
+    critical_threshold: 0.80
+    warning_score: 15
+    critical_score: 30
+
+  page_faults:
+    enabled: true
+    warning_threshold: 20
+    critical_threshold: 100
+    warning_score: 10
+    critical_score: 20
+
+  memory_pressure:
+    enabled: true
+    some_warning_threshold: 5.0
+    full_warning_threshold: 1.0
+    some_weight: 10
+    full_weight: 15
+
+  swap_activity:
+    enabled: true
+    warning_threshold: 300
+    critical_threshold: 1000
+    warning_score: 5
+    critical_score: 10
+
+# 决策规则
+decision:
+  warning_threshold: 40
+  critical_threshold: 60
+  min_categories_for_critical: 2
+
+# 恢复条件
+recovery_conditions:
+  recovery_time_seconds: 20
+  max_memory_usage: 0.85
+  min_cache_hit_ratio: 0.95
+  max_major_faults_per_sec: 5
+  max_swap_activity_per_sec: 100

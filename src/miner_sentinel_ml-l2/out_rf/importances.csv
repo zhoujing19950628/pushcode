@@ -1,0 +1,14 @@
+feature,importance
+cachestat_BUFFERS(MB),0.5288136153995068
+cpuunclaimed_CPU(%),0.18997686406327308
+cachestat_CACHED(MB),0.15427883124604796
+ramusage_USED(%),0.11542769684526928
+biopattern_KBYTES,0.01082885009861888
+cachestat_HITS,0.0006289347236709693
+biopattern_COUNT,4.520762361302022e-05
+biopattern_RND(%),0.0
+pidpersec_PID/s,0.0
+biopattern_SEQ(%),0.0
+tcpstates_NEWSTATE,0.0
+bindsnoop_PROT_TCP,0.0
+bindsnoop_PROT_UDP,0.0

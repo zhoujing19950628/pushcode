@@ -1,0 +1,59 @@
+# 系统可信进程白名单（直接使用字符串列表）
+trusted_processes:
+  - "systemd"
+  - "kernel"
+  - "init"
+  - "ukui"
+  - "kwin"
+  - "lightdm"
+  - "peony"
+  - "panel"
+  - "kylin"
+  - "kysec"
+  - "qaxsafe"
+  - "dbus"
+  - "pulseaudio"
+  - "ssh"
+  - "dhclient"
+  - "upower"
+  - "gvfs"
+  - "agetty"
+  - "sni"
+  - "dconf"
+  - "kscreen"
+  - "sdk"
+
+# 进程名精确匹配
+exact_matches:
+  - "systemd"
+  - "init"
+  - "kernel"
+  - "dbus-daemon"
+  - "ssh-agent"
+  - "pulseaudio"
+  - "dhclient"
+  - "upowerd"
+  - "lightdm"
+  - "ukui-session"
+  - "ukui-kwin_x11"
+  - "ukui-panel"
+  - "peony-qt-desktop"
+  - "kysec-daemon"
+  - "qaxsafed"
+
+# 用户自定义白名单
+user_whitelist:
+  - "chrome"
+  - "firefox"
+  - "vscode"
+  - "pycharm"
+  - "python"
+  - "java"
+
+# 白名单检查选项
+options:
+  skip_system_processes: true
+  skip_low_cpu_processes: true
+  skip_short_lived_processes: true
+  cpu_threshold: 1.0
+  min_uptime_seconds: 300

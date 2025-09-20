@@ -1,0 +1,14 @@
+sampling_interval_seconds: 2
+cooldown_period_seconds: 120
+l2_scan_interval: 30
+l3_hash_threshold: 0.9375
+
+recovery_conditions:
+  recovery_time_seconds: 20
+  max_cpu_percent: 80
+  max_memory_percent: 85
+
+alert_channels:
+  console: true
+  log_file: true
+  email: false

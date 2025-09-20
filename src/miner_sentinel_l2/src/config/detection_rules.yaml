@@ -1,0 +1,21 @@
+# 检测器权重配置
+detector_weights:
+  cpu: 0.35
+  network: 0.30
+  process: 0.25
+  memory: 0.10
+
+# 阈值配置
+thresholds:
+  suspicious: 0.4
+  confirmed: 0.7
+
+# 已知矿池配置
+known_mining_pools:
+  ports: [3333, 4444, 5555, 7777, 8888, 9999, 14444, 3032]
+  domains: [".stratum.", ".pool.", ".mine.", ".mining."]
+
+# 监控配置
+monitoring:
+  interval_seconds: 30
+  max_history_size: 1000
