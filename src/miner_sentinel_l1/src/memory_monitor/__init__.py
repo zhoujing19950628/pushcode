@@ -5,7 +5,7 @@
 from .collector import MemoryMetricsCollector, VmStatMetricsCalculator
 from .analyzer import MemoryPressureAnalyzer
 from .window import TimeSlidingWindow
-from .utils import read_key_value_file, read_memory_pressure_indicators
+from .utils import read_key_value_file, read_memory_pressure_indicators,read_cpu_pressure_indicators # NEW
 from .memory_judge import MemoryJudge
 
 __all__ = [
@@ -15,5 +15,6 @@ __all__ = [
     'TimeSlidingWindow',
     'read_key_value_file',
     'read_memory_pressure_indicators',
+    'read_cpu_pressure_indicators',  # NEW
     'MemoryJudge'
 ]

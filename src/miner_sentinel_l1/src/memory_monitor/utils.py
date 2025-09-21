@@ -58,3 +58,33 @@ def read_memory_pressure_indicators() -> Dict[str, float]:
         pass
 
     return result
+
+
+def read_cpu_pressure_indicators() -> Dict[str, float]:
+    """读取 /proc/pressure/cpu 中的 PSI 指标（只需要 some.avg10）"""
+    result = {"cpu_some_avg10": 0.0}
+    pressure_file = "/proc/pressure/cpu"
+
+    if not os.path.exists(pressure_file):
+        return result
+
+    try:
+        with open(pressure_file, 'r', encoding='utf-8') as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                # 形如: "some avg10=2.13 avg60=1.54 avg300=0.89 total=12345678"
+                if line.startswith("some"):
+                    for part in line.split()[1:]:
+                        if part.startswith("avg10="):
+                            val = part.split("=", 1)[1]
+                            try:
+                                result["cpu_some_avg10"] = float(val)
+                            except ValueError:
+                                pass
+                    break
+    except (IOError, PermissionError):
+        pass
+
+    return result

@@ -9,7 +9,7 @@ from .window import TimeSlidingWindow
 
 
 class MemoryJudge:
-    """挖矿行为检测器"""
+    """挖矿行为检测器（支持 CPU PSI & CPU 利用率）"""
 
     def __init__(self, config: Dict, project_root: Path):
         self.config = config
@@ -17,10 +17,14 @@ class MemoryJudge:
         self.metrics_collector = MemoryMetricsCollector()
         self.analyzer = MemoryPressureAnalyzer(config)
 
-        # 初始化滑动窗口
+        # 初始化滑动窗口（新增 cpu_some_avg10、cpu_utilization）
         self.monitoring_metrics = [
-            "memory_usage", "cache_hit_ratio", "some_avg10", "full_avg10",
-            "pgmajfault_per_sec", "pswpin_per_sec", "pswpout_per_sec"
+            "memory_usage",
+            "cache_hit_ratio",
+            "some_avg10", "full_avg10",         # memory PSI
+            "pgmajfault_per_sec", "pswpin_per_sec", "pswpout_per_sec",
+            "cpu_some_avg10",                   # NEW: CPU PSI (some.avg10)
+            "cpu_utilization"                   # NEW: 全局 CPU 利用率 0~1
         ]
         self.metric_windows = {
             metric: TimeSlidingWindow(config.get("time_window_seconds", 60))
@@ -32,7 +36,7 @@ class MemoryJudge:
         self.consecutive_healthy_samples = 0
 
     def _check_recovery_conditions(self, raw_metrics: Dict[str, float], recovery_config: Dict) -> bool:
-        """检查恢复条件"""
+        """检查恢复条件（支持可选 CPU 门槛）"""
         memory_usage = raw_metrics.get("memory_usage", 1.0)
         cache_hit_ratio = raw_metrics.get("cache_hit_ratio", 0.0)
         major_faults = raw_metrics.get("pgmajfault_per_sec", float('inf'))
@@ -40,17 +44,30 @@ class MemoryJudge:
         swap_out = raw_metrics.get("pswpout_per_sec", 0.0)
         total_swap = swap_in + swap_out
 
-        return (
-                memory_usage < recovery_config.get("max_memory_usage", 0.85) and
-                cache_hit_ratio > recovery_config.get("min_cache_hit_ratio", 0.95) and
-                major_faults < recovery_config.get("max_major_faults_per_sec", 5.0) and
-                total_swap < recovery_config.get("max_swap_activity_per_sec", 100.0)
+        base_ok = (
+            memory_usage < recovery_config.get("max_memory_usage", 0.85) and
+            cache_hit_ratio > recovery_config.get("min_cache_hit_ratio", 0.95) and
+            major_faults < recovery_config.get("max_major_faults_per_sec", 5.0) and
+            total_swap < recovery_config.get("max_swap_activity_per_sec", 100.0)
         )
+
+        # 可选 CPU 恢复门槛（未配置则不生效，不影响原有逻辑）
+        cpu_ok = True
+        if "max_cpu_some_pressure" in recovery_config:
+            cpu_some = raw_metrics.get("cpu_some_avg10")
+            # 若启用该门槛但当前读不到指标，则视为不健康，避免误恢复
+            cpu_ok = (cpu_some is not None) and (cpu_some < recovery_config["max_cpu_some_pressure"])
+
+        if "max_cpu_utilization" in recovery_config:
+            cpu_util = raw_metrics.get("cpu_utilization")
+            cpu_ok = cpu_ok and (cpu_util is not None) and (cpu_util < recovery_config["max_cpu_utilization"])
+
+        return base_ok and cpu_ok
 
     def _create_heartbeat_message(self, timestamp: float, status: str, total_score: int,
                                   category_count: int, metrics: Dict[str, float],
                                   component_scores: Dict[str, int]) -> Dict:
-        """创建心跳消息"""
+        """创建心跳消息（新增 CPU 指标字段）"""
         return {
             "timestamp": int(timestamp),
             "status": status,
@@ -58,8 +75,15 @@ class MemoryJudge:
             "category_count": category_count,
             "memory_usage": round(metrics.get("memory_usage", 0.0), 3),
             "cache_hit_ratio": round(metrics.get("cache_hit_ratio", 0.0), 3) if "cache_hit_ratio" in metrics else None,
+
+            # memory PSI
             "some_pressure": round(metrics.get("some_avg10", 0.0), 3),
             "full_pressure": round(metrics.get("full_avg10", 0.0), 3),
+
+            # NEW: CPU PSI & CPU 利用率
+            "cpu_some_pressure": round(metrics.get("cpu_some_avg10", 0.0), 3) if "cpu_some_avg10" in metrics else None,
+            "cpu_utilization": round(metrics.get("cpu_utilization", 0.0), 3) if "cpu_utilization" in metrics else None,
+
             "major_faults_per_sec": round(metrics.get("pgmajfault_per_sec", 0.0), 3),
             "swap_activity_per_sec": round(
                 metrics.get("pswpin_per_sec", 0.0) + metrics.get("pswpout_per_sec", 0.0), 3
@@ -68,7 +92,7 @@ class MemoryJudge:
         }
 
     def _log_event(self, timestamp: float, status: str, total_score: int,
-                   category_count: int, heartbeat: Dict):
+                category_count: int, heartbeat: Dict):
         """记录事件到日志文件"""
         event = {
             "timestamp": int(timestamp),
@@ -77,12 +101,19 @@ class MemoryJudge:
             "categories": category_count,
             "details": heartbeat
         }
-
         try:
+            # 关键：确保目录存在
+            self.events_log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.events_log_path, "a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(event, ensure_ascii=False) + "\n")
         except IOError as e:
             print(f"无法写入事件日志: {e}", flush=True)
+
+            try:
+                with open(self.events_log_path, "a", encoding="utf-8") as log_file:
+                    log_file.write(json.dumps(event, ensure_ascii=False) + "\n")
+            except IOError as e:
+                print(f"无法写入事件日志: {e}", flush=True)
 
     def run_detection_cycle(self) -> Dict:
         """执行一次完整的检测周期"""
@@ -92,12 +123,12 @@ class MemoryJudge:
         raw_metrics = self.metrics_collector.collect_all_metrics()
         current_time = time.time()
 
-        # 更新滑动窗口
+        # 更新滑动窗口（仅对有窗口的指标入窗）
         for metric_name, value in raw_metrics.items():
             if metric_name in self.metric_windows:
                 self.metric_windows[metric_name].add_value(value, current_time)
 
-        # 计算窗口聚合值
+        # 计算窗口聚合值：fault/swap 用中位数，其余用均值
         windowed_metrics = {}
         for metric_name, window in self.metric_windows.items():
             if metric_name in ["pgmajfault_per_sec", "pswpin_per_sec", "pswpout_per_sec"]:
