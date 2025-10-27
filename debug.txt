@@ -1,0 +1,53 @@
+报错的核心意思是：
+在 %install 之后有新文件被生成（.pyc 字节码 / __pycache__ 目录），但它们不在 %files 列表里，所以 check-files 报「发现已安装(但未打包)的文件」。
+
+这些 .pyc 文件不是你主动装进去的，是 rpmbuild 的 brp-python-bytecompile 步骤自动编译生成的；而我们是在 %install 阶段就把 installed-files.list 生成好了，所以后来新增的 .pyc 自然没被收录。
+
+有两种解决方案，给你最省事的优先：
+
+方案 A（推荐）：关闭自动字节码生成
+
+在 spec 顶部关闭 brp 的 Python 字节码编译，就不会再生成这些 .pyc，也就不会触发未打包文件错误。
+
+SPEC="$HOME/rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec"
+
+# 在 BuildArch 之后或文件开头插入以下两行（任一 rpm 变种适配）
+sed -i '1i %undefine __brp_python_bytecompile\n%global _python_bytecompile 0' "$SPEC"
+
+# 重新构建（无需重打 Source0）
+rpmbuild -ba "$SPEC"
+
+
+说明：两行都加是为了兼容不同发行版的 rpm 宏实现（有的认识 %undefine __brp_python_bytecompile，有的用 _python_bytecompile 开关）。
+
+方案 B：把 .pyc 也收进包（不太优雅）
+
+如果你希望保留字节码，可以在 %files 段额外加通配，把 .pyc 一并打入。示例（放在 %files -f installed-files.list 的下一行）：
+
+%files -f installed-files.list
+/usr/lib/python3*/site-packages/**/__pycache__/*
+/usr/lib/python3*/site-packages/**/*.pyc
+
+
+注意：有的 rpm 不支持 ** 递归通配，可能需要写多层 */ */* 之类，比较繁琐；而且把 .pyc 打进包一般不推荐，所以更建议用方案 A。
+
+为什么会这样？
+
+我们在 %install 里用 find … > installed-files.list 生成了文件清单；
+
+紧接着 rpmbuild 的 brp 钩子执行（其中一个就是 brp-python-bytecompile），它会在 %{buildroot} 里为 Python 源码生成 .pyc；
+
+这些新生成的 .pyc 不在我们之前写好的清单里，于是 check-files 报错。
+
+构建成功后，别忘了验证
+# 安装
+sudo dnf -y install ~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.noarch.rpm \
+  || sudo yum -y localinstall ~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.noarch.rpm
+
+# 验证
+which cryptojacking-detect
+cryptojacking-detect --help
+ls -l /etc/kylin-ai-cryptojacking-detect/
+
+
+如果你按方案 A 改了还是报别的“未打包”文件，把 rpmbuild 的最后 30 行日志贴过来（尤其是报错前的 “Processing files:” 和 “Checking for unpackaged file(s)” 两段），我帮你把对应的 %files 或宏再对上一下。
