@@ -1,39 +1,60 @@
-方案A（推荐）：把 wheelhouse 填满再重打包
+看日志里这句已经给出真相了：
 
-在你这台要安装的机器上（x86_64），到项目根执行：
-
-NAME=kylin-ai-cryptojacking-detect
-VERSION=1.0.0
-WH="packaging/${NAME}-${VERSION}/opt/${NAME}/wheelhouse_x86_64"
-REQ="packaging/${NAME}-${VERSION}/opt/${NAME}/requirements.txt"
-
-# 确保目录存在
-mkdir -p "$WH"
-
-# 仅下载二进制轮子（优先避免源码包）
-python3 -m pip download --only-binary=:all: -r "$REQ" -d "$WH" || true
-
-# 如果依旧没有 psutil，就现场编译一个 wheel 放进去（需要 gcc 和 python3-devel）
-python3 -m pip wheel psutil -w "$WH" || {
-  dnf -y install gcc python3-devel make
-  python3 -m pip wheel psutil -w "$WH"
-}
-
-# 验证 wheelhouse 里确实有 psutil
-ls -1 "$WH" | grep -i psutil
+/opt/kylin-ai-cryptojacking-detect/.../python3: can't open file '/opt/kylin-ai-cryptojacking-detect/src/cryptojacking_detect.py': [Errno 2] No such file or directory
 
 
-如果 pandas/scikit-learn 对你这台 Python 版本没有预编译轮子，也可以先临时从 requirements.txt 里删掉它们（只保留 L1/L3 需要的包：psutil, PyYAML, websocket-client 等），等需要 L2 再补。
+也就是 包里没有 src/cryptojacking_detect.py，所以进程一启动就找不到入口文件并以 status=2 退出。原因是你之前那版 spec 在 %install 阶段把除 __init__.py 以外的 .py 都删掉了。
 
-重新打 Source0 并重建 RPM：
+马上修：
 
-TOPDIR="$(pwd)/.rpmbuild"
-( cd packaging && tar czf "$TOPDIR/SOURCES/${NAME}-${VERSION}.tar.gz" "${NAME}-${VERSION}" )
-rpmbuild --define "_topdir $TOPDIR" -ba ".rpmbuild/SPECS/${NAME}.spec"
+A. 立即应急（不用重打包，先验证思路）
+# 1) 确认确实没有
+ls -l /opt/kylin-ai-cryptojacking-detect/src/cryptojacking_detect.py
+
+# 2) 临时补回去（从你的源码树拷一份）
+cp ~/下载/kylin-ai-cryptojacking-detect/src/cryptojacking_detect.py \
+   /opt/kylin-ai-cryptojacking-detect/src/
+
+# 3) 重启服务看是否正常
+systemctl restart kylin-ai-cryptojacking-detect.service
+journalctl -u kylin-ai-cryptojacking-detect -b --no-pager -n 50
 
 
-再次安装并验证：
+如果这样能跑起来，就确定是打包把 .py 删掉导致的。
 
-sudo rpm -Uvh ".rpmbuild/RPMS/noarch/${NAME}-${VERSION}-1.noarch.rpm"
-sudo systemctl start ${NAME}.service
-systemctl status ${NAME}.service
+B. 永久修复（改 spec，重建 RPM）
+
+编辑 .rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec，把 %install 里“删 .py”的两段去掉；改成只编译不删除：
+
+# 删除你原来这两段（如果还在）：
+# find %{buildroot}/opt/%{name} -name "*.py" -exec python3 -c '...' {} +
+# find %{buildroot}/opt/%{name} -name "*.py" -not -path "*venv*" -not -name "__init__.py" -delete
+
+# 改为仅编译 pyc，保留源码
+python3 -m compileall -q -j0 %{buildroot}/opt/%{name} || :
+
+
+重新构建并安装（只改了 spec，不用重新打 Source0）：
+
+rpmbuild --define "_topdir $(pwd)/.rpmbuild" \
+         -ba .rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
+
+sudo rpm -Uvh --force .rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.noarch.rpm
+
+
+验证包里已带入口文件：
+
+rpm -ql kylin-ai-cryptojacking-detect | grep 'src/cryptojacking_detect.py'
+systemctl daemon-reload
+systemctl restart kylin-ai-cryptojacking-detect.service
+systemctl status  kylin-ai-cryptojacking-detect.service
+
+
+另外再检查下 unit 是否走包装脚本或显式带参数：
+
+推荐 ExecStart=/usr/local/bin/kylin-ai-cryptojacking-detect（包装脚本里我已经加了 --monitor）。
+
+如果你直接跑 python，请确保：
+ExecStart=.../python3 /opt/kylin-ai-cryptojacking-detect/src/cryptojacking_detect.py --monitor
+
+按上面做完，这个 No such file or directory 就会消失。若后面再报其它模块缺失（ImportError），同理检查对应 .py 是否也被删了或路径不对；保留源码后一般就不会再遇到。
