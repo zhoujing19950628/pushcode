@@ -1,42 +1,43 @@
-太好了，既然你已经在本机把程序跑通了，在麒麟（Kylin，RPM 系）上打包就按下面这套“干净版、原生 RPM 流程”来做即可——不需要再用 --nodeps 的那些兼容招了。
+1) 准备源码目录（在你的项目根）
 
-一键步骤（在麒麟主机上）
-# 0) 预装打包环境（Kylin/RHEL 系）
-sudo dnf -y install rpm-build rpmdevtools redhat-rpm-config \
-    python3-devel python3-pip python3-wheel python3-build \
-    pyproject-rpm-macros findutils coreutils
+假设你的源码目录名是 kylin-ai-cryptojacking-detect/，里面已经有 src/、pyproject.toml，并且入口是 cryptojacking_detect.py。
 
-# 1) 初始化默认构建树
-rpmdev-setuptree   # 会创建 ~/rpmbuild/{SOURCES,SPECS,...}
+若还没有 pyproject.toml，给你一个最小可用模板（直接放到项目根）：
 
-# 2) 准备源码包与 spec（建议把 spec 放在仓库里：packaging/rpm/xxx.spec）
-cd /path/to/your/repo   # 你的项目仓库根
-NAME=kylin-ai-cryptojacking-detect
-VER=0.1.0                # 与 pyproject.toml 保持一致
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
-# 打源码包（排除 .git）
-tmp=$(mktemp -d); mkdir -p "$tmp/${NAME}-${VER}"
-rsync -a --delete --exclude ".git" ./ "$tmp/${NAME}-${VER}/"
-tar -C "$tmp" -czf "$HOME/rpmbuild/SOURCES/${NAME}-${VER}.tar.gz" "${NAME}-${VER}"
-rm -rf "$tmp"
+[project]
+name = "kylin-ai-cryptojacking-detect"
+version = "0.1.0"
+description = "Cryptojacking detector (Python CLI)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+  "psutil",
+  "pandas",
+  "PyYAML",
+]
+# 让安装后自动生成 /usr/bin/cryptojacking-detect
+[project.scripts]
+cryptojacking-detect = "cryptojacking_detect:main"
 
-# 放置 spec
-cp packaging/rpm/${NAME}.spec "$HOME/rpmbuild/SPECS/"
+[tool.setuptools]
+package-dir = {"" = "src"}
 
-# 3) 让 dnf 把 BuildRequires 自动装齐
-sudo dnf -y builddep "$HOME/rpmbuild/SPECS/${NAME}.spec"
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["miner_sentinel_l1*", "miner_sentinel_l2*", "miner_sentinel_l3*"]
 
-# 4) 构建
-rpmbuild -ba "$HOME/rpmbuild/SPECS/${NAME}.spec"
 
-# 5) 安装并验证
-sudo dnf -y install "$HOME/rpmbuild/RPMS/noarch/${NAME}-${VER}-"*.noarch.rpm
-which cryptojacking-detect
-cryptojacking-detect --help
+同时在 src/ 下确保可 import 的包目录都有 __init__.py，并补齐你之前缺的 miner_sentinel_l3/src/memory_info.py。
 
-推荐的麒麟专用 .spec（用 pyproject 宏，干净可靠）
+2) 写 spec（用 pyproject 宏，干净可靠）
 
-把下面内容保存到 packaging/rpm/kylin-ai-cryptojacking-detect.spec（和你仓库里的版本号一致；YAML 的来源目录按你项目实际改）：
+把下面这份保存为：~/rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
 
 Name:           kylin-ai-cryptojacking-detect
 Version:        0.1.0
@@ -47,18 +48,18 @@ URL:            https://example.com/kylin-ai-cryptojacking-detect
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
-# 构建期依赖（麒麟/RHEL 系会自动识别并安装）
+# 构建依赖（用 pyproject 宏解析并安装构建所需）
 BuildRequires:  python3-devel
 BuildRequires:  python3-pip
 BuildRequires:  python3-wheel
 BuildRequires:  pyproject-rpm-macros
 BuildRequires:  findutils
 BuildRequires:  coreutils
-# 让宏自动根据 pyproject 解析需要的构建依赖（如 setuptools 等）
+
 %generate_buildrequires
 %pyproject_buildrequires -r
 
-# 运行时依赖（按你的代码实际需要）
+# 运行时依赖（按你的代码实际需要，仓库缺就删掉或自建）
 Requires:       python3
 Requires:       python3-psutil
 Requires:       python3-pandas
@@ -76,90 +77,74 @@ A simple command-line cryptojacking detector for Linux.
 %install
 %pyproject_install
 
-# 复制 YAML 到 /etc/，升级不覆盖用户改动
+# 可编辑 YAML -> /etc/%{name}
 install -d %{buildroot}%{_sysconfdir}/%{name}
-# 按你的实际路径改：下面示例从 l1 目录收集 *.yaml/*.yml
+# 按你的实际路径改：这里示例从 l1 目录拷 *.yaml/*.yml
 find src/miner_sentinel_l1 -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
  | xargs -0 -r install -m 0644 -t %{buildroot}%{_sysconfdir}/%{name}
 
 %files -f %{pyproject_files}
 %config(noreplace) %{_sysconfdir}/%{name}/*
-# 若仓库有这些文件，可解注
+# 如仓库暂时没有这些文件，保持注释，避免构建报“找不到文件”
 # %license LICENSE*
 # %doc README* CHANGELOG*
 
 
-说明
+关键点
 
-这份 spec 使用了 %pyproject_* 宏：会根据你的 pyproject.toml 自动构建 wheel、安装到构建根，并把 Python 模块、**自动生成的 CLI（来自 project.scripts）**收进 %files。
+project.scripts 会自动生成 /usr/bin/cryptojacking-detect，不用再手写包装器。
 
-你之前的缺模块/CLI问题，在此模式下不会再出现：只要 pyproject.toml 里定义了
+pyproject_files 宏会把 wheel 安装的所有 Python 文件正确收录到 %files。
 
-[project.scripts]
-cryptojacking-detect = "cryptojacking_detect:main"
+YAML 被单独安装到 /etc/%{name}，并用 %config(noreplace) 保护用户改动。
 
+3) 打源码包到 ~/rpmbuild/SOURCES/
 
-安装后 /usr/bin/cryptojacking-detect 会自动生成。
+在你的项目根目录执行（确保 Version 一致为 0.1.0）：
 
-/etc/%{name}/*.yaml 用 %config(noreplace) 管理，升级不覆盖用户改动。
+cd /path/to/kylin-ai-cryptojacking-detect
+NAME=kylin-ai-cryptojacking-detect
+VER=0.1.0
 
-常见坑位 & 对应解决
-
-pyproject-rpm-macros 不存在：
-先 sudo dnf install pyproject-rpm-macros。如果发行版仓库确实没有，就回退用你在 Ubuntu 上成功的那份 “手动 venv + pip 安装 + 全量收集 %files” 的 spec；在麒麟上构建时把 --nodeps 去掉即可，其它不变。
-
-仓库里没有某些运行时依赖（如 python3-pandas）：
-先启用对应源（EPEL/麒麟扩展源）。如确实无包，可暂时去掉该 Requires 并在代码里做“可选依赖”处理（try: import pandas ... except ImportError:），或自己打依赖的 RPM。
-
-找不到 YAML：改 %install 中 find 的源路径为你的真实位置。
-
-版本号同步：确保 spec 里的 Version: 与 pyproject.toml 一致；Release: 每次小改动可 +1。
-
-可选：随包提供 systemd 服务（装完即用）
-
-如果你要把守护模式常驻起来，加上这两处即可：
-
-新增服务文件（放仓库 packaging/rpm/kylin-ai-cryptojacking-detect.service）：
-
-[Unit]
-Description=Kylin AI Cryptojacking Detector
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/cryptojacking-detect --monitor
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
+tmp=$(mktemp -d); mkdir -p "$tmp/${NAME}-${VER}"
+# 打包整个项目（排除 .git）
+rsync -a --delete --exclude ".git" ./ "$tmp/${NAME}-${VER}/"
+tar -C "$tmp" -czf "$HOME/rpmbuild/SOURCES/${NAME}-${VER}.tar.gz" "${NAME}-${VER}"
+rm -rf "$tmp"
 
 
-在 .spec 里加入安装与脚本段（紧跟 %install 里）：
+注意：源码包顶层目录名必须是 Name-Version（上面的命令已处理）。
 
-# 安装 systemd 单元
-install -Dpm0644 packaging/rpm/kylin-ai-cryptojacking-detect.service \
-    %{buildroot}%{_unitdir}/kylin-ai-cryptojacking-detect.service
+4) 拉起构建
+# 自动安装本 spec 需要的构建期依赖（可选）
+sudo dnf -y builddep "$HOME/rpmbuild/SPECS/${NAME}.spec" || true
 
-%post
-%systemd_post kylin-ai-cryptojacking-detect.service
-
-%preun
-%systemd_preun kylin-ai-cryptojacking-detect.service
-
-%postun
-%systemd_postun_with_restart kylin-ai-cryptojacking-detect.service
+# 构建 SRPM + RPM
+rpmbuild -ba "$HOME/rpmbuild/SPECS/${NAME}.spec"
 
 
-并在 %files 末尾加：
+成功后产物在：
 
-%{_unitdir}/kylin-ai-cryptojacking-detect.service
+~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.noarch.rpm
+~/rpmbuild/SRPMS/kylin-ai-cryptojacking-detect-0.1.0-1.src.rpm
 
+5) 安装并验证
+sudo dnf -y install ~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.noarch.rpm
+which cryptojacking-detect
+cryptojacking-detect --help
+ls -l /etc/kylin-ai-cryptojacking-detect/
 
-安装后：
+常见问题速解
 
-sudo systemctl enable --now kylin-ai-cryptojacking-detect
-systemctl status kylin-ai-cryptojacking-detect
+提示某些 python3-xxx 依赖找不到：先从 Requires: 里去掉对应行，再让程序在 ImportError 时给出友好提示；或启用额外软件源（如 EPEL/麒麟扩展源）后再加回。
 
+“找不到 README/LICENCE”：在项目根放占位文件 README.md、LICENSE，或保持 spec 中相应行注释。
 
-按上面这套，你在麒麟上就是标准原生 RPM 打包 → dnf 安装 → 直接可运行的流程了。
-如果你愿意，把你当前的 pyproject.toml 和（准备投产的）.spec 发我，我可以帮你做最后一次对齐检查（入口脚本、YAML 路径、依赖名）再开打
+CLI 没生成：确认 pyproject.toml 里 [project.scripts] 有
+cryptojacking-detect = "cryptojacking_detect:main"；若入口不叫 main()，写成实际函数名。
+
+YAML 没被装进包：把 spec 里 find src/miner_sentinel_l1 ... 的源路径改为你真实放 YAML 的目录。
+
+导入缺模块（如 memory_info）：这属于源码缺失，确保 src/miner_sentinel_l3/src/memory_info.py 随源码一起打进 Source0（用上面的 tar 打包就会包含）。
+
+如果你愿意，把你当前项目根结构（tree -L 2）和 pyproject.toml（尤其 [project.scripts] 段）贴我，我可以帮你再对齐一次，确保一次构建通过。
