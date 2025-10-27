@@ -1,77 +1,118 @@
-报错的核心意思是：
-在 %install 之后有新文件被生成（.pyc 字节码 / __pycache__ 目录），但它们不在 %files 列表里，所以 check-files 报「发现已安装(但未打包)的文件」。
+可以的，不需要 pyproject.toml。你完全可以只写一个 .spec 就把项目打成 RPM。思路是：在 %install 里把你的 src/ 代码直接复制到 Python 的 site-packages，再手动放一个 /usr/bin/cryptojacking-detect 的启动脚本，最后生成 %files 清单。
 
-这些 .pyc 文件不是你主动装进去的，是 rpmbuild 的 brp-python-bytecompile 步骤自动编译生成的；而我们是在 %install 阶段就把 installed-files.list 生成好了，所以后来新增的 .pyc 自然没被收录。
+下面给你一份不依赖 pyproject 宏、也不走 pip 的最小可用 .spec，复制即可用。
 
-有两种解决方案，给你最省事的优先：
+1) 最小可用 .spec（纯手工安装，适配任何 RPM 系）
 
-方案 A（推荐）：关闭自动字节码生成
+保存为：~/rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
+你需要的源码结构：
+src/cryptojacking_detect.py（里面有 def main()）
+src/miner_sentinel_l1/...、src/miner_sentinel_l2/...、src/miner_sentinel_l3/...（这些目录要有 __init__.py；l3/src/memory_info.py 记得补齐）
 
-在 spec 顶部关闭 brp 的 Python 字节码编译，就不会再生成这些 .pyc，也就不会触发未打包文件错误。
+Name:           kylin-ai-cryptojacking-detect
+Version:        0.1.0
+Release:        1%{?dist}
+Summary:        Cryptojacking detector (Python CLI)
+License:        MIT
+URL:            https://example.com/kylin-ai-cryptojacking-detect
+Source0:        %{name}-%{version}.tar.gz
+BuildArch:      noarch
 
-SPEC="$HOME/rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec"
+# 关掉自动 .pyc 生成，避免“已安装但未打包的文件”错误
+%undefine __brp_python_bytecompile
+%global _python_bytecompile 0
 
-# 在 BuildArch 之后或文件开头插入以下两行（任一 rpm 变种适配）
-sed -i '1i %undefine __brp_python_bytecompile\n%global _python_bytecompile 0' "$SPEC"
+# 这里只要最基础依赖；不使用 pyproject 宏，不要求 redhat-rpm-config
+BuildRequires:  python3
+BuildRequires:  findutils
+BuildRequires:  coreutils
 
-# 重新构建（无需重打 Source0）
-rpmbuild -ba "$SPEC"
+# 运行时依赖（仓库没有就先删掉相应行）
+Requires:       python3
+Requires:       python3-psutil
+#Requires:      python3-pandas
+Requires:       python3-pyyaml
 
+%description
+A simple command-line cryptojacking detector for Linux.
 
-说明：两行都加是为了兼容不同发行版的 rpm 宏实现（有的认识 %undefine __brp_python_bytecompile，有的用 _python_bytecompile 开关）。
+%prep
+%autosetup -n %{name}-%{version}
 
-方案 B：把 .pyc 也收进包（不太优雅）
+%build
+# 纯 Python，无需编译
 
-如果你希望保留字节码，可以在 %files 段额外加通配，把 .pyc 一并打入。示例（放在 %files -f installed-files.list 的下一行）：
+%install
+# 计算 Python 安装纯库目录（site-packages）
+SITELIB=$(/usr/bin/python3 - <<'PY'
+import sysconfig; print(sysconfig.get_paths()["purelib"])
+PY
+)
+
+# 1) 安装你的 Python 源码到 site-packages
+mkdir -p "%{buildroot}${SITELIB}"
+# 主入口模块（确保 src/cryptojacking_detect.py 存在且有 main()）
+install -m 0644 src/cryptojacking_detect.py "%{buildroot}${SITELIB}/"
+# 三个包目录（都要有 __init__.py）
+cp -a src/miner_sentinel_l1 src/miner_sentinel_l2 src/miner_sentinel_l3 "%{buildroot}${SITELIB}/"
+
+# 2) 安装可执行脚本（手动包装，不依赖 console_scripts）
+install -Dpm0755 /dev/stdin %{buildroot}%{_bindir}/cryptojacking-detect <<'EOF'
+#!/usr/bin/python3
+from cryptojacking_detect import main
+if __name__ == "__main__":
+    raise SystemExit(main())
+EOF
+
+# 3) 把 l1 里的 YAML 装到 /etc，可编辑、升级不覆盖
+install -d %{buildroot}%{_sysconfdir}/%{name}
+find src/miner_sentinel_l1 -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
+  | xargs -0 -r install -m 0644 -t %{buildroot}%{_sysconfdir}/%{name}
+
+# 4) 生成 %files 清单（全量收集，再把 /etc 标为配置）
+( cd %{buildroot} && find . -type f -printf "/%P\n" | sort -u ) > installed-files.list
+awk 'BEGIN{cfg="/etc/%{name}/"} { if (index($0,cfg)==1) print "%config(noreplace) "$0; else print $0 }' \
+    installed-files.list > installed-files.list.new && mv installed-files.list.new installed-files.list
 
 %files -f installed-files.list
-/usr/lib/python3*/site-packages/**/__pycache__/*
-/usr/lib/python3*/site-packages/**/*.pyc
+
+%changelog
+* Thu Oct 23 2025 You <you@example.com> - 0.1.0-1
+- Initial RPM (no pyproject / no pip)
+
+2) 打源码包并构建
+
+在你的项目根目录执行（VER 与上面 spec 的 Version 一致）：
+
+NAME=kylin-ai-cryptojacking-detect
+VER=0.1.0
+
+# 打 Source0 到 ~/rpmbuild/SOURCES（注意顶层目录名必须是 Name-Version）
+tmp=$(mktemp -d); mkdir -p "$tmp/${NAME}-${VER}"
+rsync -a --delete --exclude ".git" ./ "$tmp/${NAME}-${VER}/"
+tar -C "$tmp" -czf "$HOME/rpmbuild/SOURCES/${NAME}-${VER}.tar.gz" "${NAME}-${VER}"
+rm -rf "$tmp"
+
+# 构建
+rpmbuild -ba "$HOME/rpmbuild/SPECS/${NAME}.spec"
 
 
-注意：有的 rpm 不支持 ** 递归通配，可能需要写多层 */ */* 之类，比较繁琐；而且把 .pyc 打进包一般不推荐，所以更建议用方案 A。
+成功后包在：
 
-为什么会这样？
+~/rpmbuild/RPMS/noarch/${NAME}-${VER}-*.noarch.rpm
 
-我们在 %install 里用 find … > installed-files.list 生成了文件清单；
+3) 安装与验证
+RPM=$(ls -1t ~/rpmbuild/RPMS/noarch/${NAME}-${VER}-*.noarch.rpm | head -n1)
+sudo dnf -y install "$RPM" || sudo yum -y localinstall "$RPM"
 
-紧接着 rpmbuild 的 brp 钩子执行（其中一个就是 brp-python-bytecompile），它会在 %{buildroot} 里为 Python 源码生成 .pyc；
-
-这些新生成的 .pyc 不在我们之前写好的清单里，于是 check-files 报错。
-
-构建成功后，别忘了验证
-# 安装
-sudo dnf -y install ~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.noarch.rpm \
-  || sudo yum -y localinstall ~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.noarch.rpm
-
-# 验证
 which cryptojacking-detect
 cryptojacking-detect --help
-ls -l /etc/kylin-ai-cryptojacking-detect/
+rpm -ql ${NAME} | head
 
+什么时候需要 pyproject.toml？
 
-----------------------------------------------------------
-构建其实成功了，只是你安装时用的文件名不对。
+想用 标准 Python 打包（wheel/sdist）、自动生成 console_scripts、在不同平台上统一构建时，它很方便。
 
-在日志里可以看到 rpmbuild 写出了：
+但不是必须。像上面这样直接把代码拷到 site-packages 并手写可执行脚本，也能干净地完成打包。
 
-/root/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.kyll.noarch.rpm
-
-
-注意中间有个 .kyll（这是 %{?dist} 展开出的发行版后缀）。你安装时用了 …-1.noarch.rpm，自然找不到。
-
-这样安装就行
-# 先确认文件名
-ls -l ~/rpmbuild/RPMS/noarch/
-
-# 精确安装（包含 .kyll 后缀）
-sudo dnf -y install ~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.kyll.noarch.rpm
-
-# 或者用通配，自动取最新那一个
-RPM=$(ls -1t ~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.noarch.rpm | head -n1)
-sudo dnf -y install "$RPM"
-
-验证
-which cryptojacking-detect
-cryptojacking-detect --help
-rpm -ql kylin-ai-cryptojacking-detect | head
+如果你按这份 spec 走仍有报错，把 rpmbuild 最后的 30 行日志贴过来（尤其是 “Checking for unpackaged file(s)” 那段），我会根据错误点对 %files 或路径做微调。
