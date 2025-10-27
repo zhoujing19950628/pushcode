@@ -1,60 +1,131 @@
-看日志里这句已经给出真相了：
+可以。下面这份 按你同事风格（拷贝目标目录、按架构处理、简洁脚本段）的 spec，已替你适配到你的项目（Python+venv、带 systemd 服务、离线优先装依赖、保留源码不删 .py）。
 
-/opt/kylin-ai-cryptojacking-detect/.../python3: can't open file '/opt/kylin-ai-cryptojacking-detect/src/cryptojacking_detect.py': [Errno 2] No such file or directory
+Name:           kylin-ai-cryptojacking-detect
+Version:        1.0.0
+Release:        1%{?dist}
+Summary:        Kylin AI Cryptojacking Detect
+License:        Proprietary
+URL:            http://www.kylinos.cn
+Source0:        %{name}-%{version}.tar.gz
 
+BuildArch:      noarch
+ExcludeArch:    loongarch64
 
-也就是 包里没有 src/cryptojacking_detect.py，所以进程一启动就找不到入口文件并以 status=2 退出。原因是你之前那版 spec 在 %install 阶段把除 __init__.py 以外的 .py 都删掉了。
+# 运行期依赖（创建 venv & systemd）
+Requires:       python3 >= 3.6
+Requires:       systemd
 
-马上修：
+%description
+Python-based cryptojacking detector. Installs to /opt/%{name}, creates
+a dedicated venv, and provides a systemd service.
 
-A. 立即应急（不用重打包，先验证思路）
-# 1) 确认确实没有
-ls -l /opt/kylin-ai-cryptojacking-detect/src/cryptojacking_detect.py
+%prep
+%setup -q
 
-# 2) 临时补回去（从你的源码树拷一份）
-cp ~/下载/kylin-ai-cryptojacking-detect/src/cryptojacking_detect.py \
-   /opt/kylin-ai-cryptojacking-detect/src/
+%build
+# nothing
 
-# 3) 重启服务看是否正常
-systemctl restart kylin-ai-cryptojacking-detect.service
-journalctl -u kylin-ai-cryptojacking-detect -b --no-pager -n 50
+%install
+# 目录就绪
+mkdir -p %{buildroot}/usr/bin
+mkdir -p %{buildroot}/opt/%{name}
+mkdir -p %{buildroot}/etc/systemd/system
 
+# 拷贝业务负载（按你同事风格从源码包复制到目标路径）
+cp -a %{_builddir}/%{name}-%{version}/opt/%{name}/* \
+      %{buildroot}/opt/%{name}/
 
-如果这样能跑起来，就确定是打包把 .py 删掉导致的。
+# 包装启动器（/usr/bin/%{name}；内容随 Source0 提供）
+install -m 0755 %{_builddir}/%{name}-%{version}/usr/bin/%{name} \
+        %{buildroot}/usr/bin/%{name}
 
-B. 永久修复（改 spec，重建 RPM）
+# systemd 单元
+install -m 0644 %{_builddir}/%{name}-%{version}/%{name}.service \
+        %{buildroot}/etc/systemd/system/%{name}.service
 
-编辑 .rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec，把 %install 里“删 .py”的两段去掉；改成只编译不删除：
-
-# 删除你原来这两段（如果还在）：
-# find %{buildroot}/opt/%{name} -name "*.py" -exec python3 -c '...' {} +
-# find %{buildroot}/opt/%{name} -name "*.py" -not -path "*venv*" -not -name "__init__.py" -delete
-
-# 改为仅编译 pyc，保留源码
+# 仅编译字节码，保留源码，避免入口被删
 python3 -m compileall -q -j0 %{buildroot}/opt/%{name} || :
 
+# 根据架构裁剪 wheelhouse
+%ifarch x86_64
+rm -rf %{buildroot}/opt/%{name}/wheelhouse_aarch64
+%endif
+%ifarch aarch64
+rm -rf %{buildroot}/opt/%{name}/wheelhouse_x86_64
+%endif
 
-重新构建并安装（只改了 spec，不用重新打 Source0）：
+%post
+# 创建 venv，并“离线优先、在线兜底”安装依赖
+set -e
+INSTALL_DIR="/opt/%{name}"
+VENV="$INSTALL_DIR/%{name}-venv"
+PY="$VENV/bin/python3"
+PIP="$VENV/bin/pip"
 
-rpmbuild --define "_topdir $(pwd)/.rpmbuild" \
-         -ba .rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
+[ -x "$PY" ] || python3 -m venv "$VENV"
+"$PY" -m ensurepip --upgrade >/dev/null 2>&1 || :
 
-sudo rpm -Uvh --force .rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.noarch.rpm
+case "$(uname -m)" in
+  x86_64)  WH="$INSTALL_DIR/wheelhouse_x86_64" ;;
+  aarch64) WH="$INSTALL_DIR/wheelhouse_aarch64" ;;
+  *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
+esac
+
+if [ -s "$INSTALL_DIR/requirements.txt" ]; then
+  if ! "$PIP" install --no-index --find-links="$WH" -r "$INSTALL_DIR/requirements.txt"; then
+    if [ "${KACD_OFFLINE_ONLY:-0}" -eq 1 ]; then
+      echo "Offline-only & missing wheels in $WH" >&2; exit 1
+    fi
+    "$PIP" install -r "$INSTALL_DIR/requirements.txt"
+  fi
+fi
+
+chmod 755 /usr/bin/%{name} || :
+systemctl daemon-reload >/dev/null 2>&1 || :
+systemctl enable %{name}.service >/dev/null 2>&1 || :
+exit 0
+
+%preun
+# 卸载时停用服务
+if [ "$1" -eq 0 ]; then
+  systemctl stop %{name}.service >/dev/null 2>&1 || :
+  systemctl disable %{name}.service >/dev/null 2>&1 || :
+fi
+
+%postun
+systemctl daemon-reload >/dev/null 2>&1 || :
+
+%files
+# 先排除，后整体收录，再以 config 方式单列，避免“被列出两次”警告
+%exclude /opt/%{name}/src/miner_sentinel_l1/src/config/monitoring_rules.yaml
+%exclude /opt/%{name}/src/miner_sentinel_l2/src/config/pid_whitelist.yaml
+/opt/%{name}
+/usr/bin/%{name}
+/etc/systemd/system/%{name}.service
+%config(noreplace) /opt/%{name}/src/miner_sentinel_l1/src/config/monitoring_rules.yaml
+%config(noreplace) /opt/%{name}/src/miner_sentinel_l2/src/config/pid_whitelist.yaml
+
+%changelog
+* Thu Oct 23 2025 You <you@example.com> 1.0.0-1
+- Follow colleague's concise style: copy payload, arch prune, simple scriptlets.
+- Keep .py sources; compile only.
+- Offline-first dependency install with optional online fallback (KACD_OFFLINE_ONLY=1 to forbid).
+
+你的 Source0（%{name}-%{version}.tar.gz）里需要包含
+
+opt/kylin-ai-cryptojacking-detect/：src/ 源码、requirements.txt、wheelhouse_x86_64/ 与（可选）wheelhouse_aarch64/
+
+usr/bin/kylin-ai-cryptojacking-detect：包装启动器（内部需调用 …/python3 …/src/cryptojacking_detect.py --monitor）
+
+kylin-ai-cryptojacking-detect.service：systemd 单元（ExecStart=/usr/bin/kylin-ai-cryptojacking-detect）
+
+构建与安装（在项目根）
+# 放好 Source0 后：
+rpmbuild --define "_topdir $(pwd)/.rpmbuild" -ba .rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
+
+# 安装
+sudo rpm -Uvh .rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.noarch.rpm
+sudo systemctl restart kylin-ai-cryptojacking-detect.service
 
 
-验证包里已带入口文件：
-
-rpm -ql kylin-ai-cryptojacking-detect | grep 'src/cryptojacking_detect.py'
-systemctl daemon-reload
-systemctl restart kylin-ai-cryptojacking-detect.service
-systemctl status  kylin-ai-cryptojacking-detect.service
-
-
-另外再检查下 unit 是否走包装脚本或显式带参数：
-
-推荐 ExecStart=/usr/local/bin/kylin-ai-cryptojacking-detect（包装脚本里我已经加了 --monitor）。
-
-如果你直接跑 python，请确保：
-ExecStart=.../python3 /opt/kylin-ai-cryptojacking-detect/src/cryptojacking_detect.py --monitor
-
-按上面做完，这个 No such file or directory 就会消失。若后面再报其它模块缺失（ImportError），同理检查对应 .py 是否也被删了或路径不对；保留源码后一般就不会再遇到。
+这样既保留了你同事那种“简洁拷贝式”的写法，又解决了你之前遇到的 .py 丢失、依赖缺失和 %files 警告问题。
