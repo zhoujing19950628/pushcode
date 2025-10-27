@@ -1,0 +1,59 @@
+1) 先确认产物存在
+
+在项目根执行：
+
+ls -l .rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.rpm
+ls -l .rpmbuild/SRPMS/kylin-ai-cryptojacking-detect-*.src.rpm
+
+2) 看包里打了哪些文件
+rpm -qlp .rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.rpm | head -n 50
+# 重点看看是否包含：
+# /opt/kylin-ai-cryptojacking-detect/...
+# /usr/local/bin/kylin-ai-cryptojacking-detect
+# /etc/systemd/system/kylin-ai-cryptojacking-detect.service
+
+3) 看安装脚本是否在包里（创建 venv、装依赖等）
+rpm -qp --scripts .rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.rpm
+# 里面应看到 %post/%preun/%postun 脚本
+
+4) 真机安装+冒烟测试
+sudo rpm -Uvh .rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.rpm
+
+# 验证 venv 是否创建、依赖是否装好
+ls -l /opt/kylin-ai-cryptojacking-detect/kylin-ai-cryptojacking-detect-venv/bin/python
+
+# 启动服务并检查
+sudo systemctl daemon-reload
+sudo systemctl enable --now kylin-ai-cryptojacking-detect.service
+systemctl status kylin-ai-cryptojacking-detect.service
+journalctl -u kylin-ai-cryptojacking-detect -b --no-pager | tail -n 50
+
+
+如果要卸载：
+
+sudo rpm -e kylin-ai-cryptojacking-detect
+#（我们在 %preun 里会停服务并禁用；如需顺便删 venv，可在 spec 里把那行 rm -rf 取消注释）
+
+5) 关于“被列出两次的文件”的警告（可选修复）
+
+这是因为 %files 里既列了整个 /opt/%{name} 目录，又单独标了配置文件 %config(noreplace)，导致重复。
+改法：先 排除 再 单列，并且不要再单列相同的目录一遍。把 spec 里的 %files 调整为：
+
+%files
+# 先排除，再整体收录目录，最后以 config 方式单独加入
+%exclude /opt/%{name}/src/miner_sentinel_l1/src/config/monitoring_rules.yaml
+/opt/%{name}
+/usr/local/bin/%{name}
+/etc/systemd/system/%{name}.service
+%config(noreplace) /opt/%{name}/src/miner_sentinel_l1/src/config/monitoring_rules.yaml
+
+
+注意：去掉原来同时出现的
+"%dir /opt/%{name}" 和 "/opt/%{name}" 的“双份声明”，保留后者即可。
+
+改完后重建：
+
+rpmbuild --define "_topdir $(pwd)/.rpmbuild" -ba .rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
+
+
+再次构建时这些 warnings 就会消失。
