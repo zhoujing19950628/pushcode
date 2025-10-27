@@ -1,4 +1,10 @@
-可以。下面这份 按你同事风格（拷贝目标目录、按架构处理、简洁脚本段）的 spec，已替你适配到你的项目（Python+venv、带 systemd 服务、离线优先装依赖、保留源码不删 .py）。
+原因是：你的 Source0 压缩包里没有 usr/bin/kylin-ai-cryptojacking-detect（以及可能也没有 *.service），而我那份 spec 是“从 Source0 里拷贝这两个文件”。——所以自然报 “找不到”。
+
+最稳的修法：让 spec 在 %install 里“就地生成”包装脚本和 systemd 单元，不再依赖它们是否打进 Source0。把下面这份“自给自足”的 spec 覆盖掉你当前的即可。
+
+修正版（自带 wrapper + service，不再从 Source0 拷贝）
+
+把这段保存为：.rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
 
 Name:           kylin-ai-cryptojacking-detect
 Version:        1.0.0
@@ -10,14 +16,12 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
 ExcludeArch:    loongarch64
-
-# 运行期依赖（创建 venv & systemd）
 Requires:       python3 >= 3.6
 Requires:       systemd
 
 %description
 Python-based cryptojacking detector. Installs to /opt/%{name}, creates
-a dedicated venv, and provides a systemd service.
+a venv on install, and provides a systemd service.
 
 %prep
 %setup -q
@@ -26,27 +30,70 @@ a dedicated venv, and provides a systemd service.
 # nothing
 
 %install
-# 目录就绪
-mkdir -p %{buildroot}/usr/bin
+rm -rf %{buildroot}
+
+# 1) 业务负载：从 Source0 的 opt/%{name}/ 拷到目标
 mkdir -p %{buildroot}/opt/%{name}
+cp -a opt/%{name}/* %{buildroot}/opt/%{name}/
+
+# 2) 生成 /usr/bin 启动包装脚本（不再依赖 Source0 是否带该文件）
+mkdir -p %{buildroot}/usr/bin
+cat > %{buildroot}/usr/bin/%{name} <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+APP="/opt/kylin-ai-cryptojacking-detect"
+VENV="$APP/kylin-ai-cryptojacking-detect-venv"
+PY="$VENV/bin/python3"
+PIP="$VENV/bin/pip"
+
+# 首次创建 venv 并装依赖：离线优先，失败在线兜底
+if [ ! -x "$PY" ]; then
+  python3 -m venv "$VENV"
+  "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || :
+  ARCH="$(uname -m)"
+  case "$ARCH" in
+    x86_64)  WH="$APP/wheelhouse_x86_64" ;;
+    aarch64) WH="$APP/wheelhouse_aarch64" ;;
+    *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
+  esac
+  if [ -s "$APP/requirements.txt" ]; then
+    if ! "$PIP" install --no-index --find-links="$WH" -r "$APP/requirements.txt"; then
+      if [ "${KACD_OFFLINE_ONLY:-0}" -eq 1 ]; then
+        echo "Offline-only & missing wheels in $WH" >&2; exit 1
+      fi
+      "$PIP" install -r "$APP/requirements.txt"
+    fi
+  fi
+fi
+
+# 运行你的入口；默认附加 --monitor，可按需要改
+exec "$PY" "$APP/src/cryptojacking_detect.py" --monitor "$@"
+EOF
+chmod 0755 %{buildroot}/usr/bin/%{name}
+
+# 3) 生成 systemd 单元（不再依赖 Source0 是否带该文件）
 mkdir -p %{buildroot}/etc/systemd/system
+cat > %{buildroot}/etc/systemd/system/%{name}.service <<'EOF'
+[Unit]
+Description=Kylin AI Cryptojacking Detect
+After=network.target
 
-# 拷贝业务负载（按你同事风格从源码包复制到目标路径）
-cp -a %{_builddir}/%{name}-%{version}/opt/%{name}/* \
-      %{buildroot}/opt/%{name}/
+[Service]
+Type=simple
+WorkingDirectory=/opt/kylin-ai-cryptojacking-detect
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/kylin-ai-cryptojacking-detect
+Restart=always
+RestartSec=3
 
-# 包装启动器（/usr/bin/%{name}；内容随 Source0 提供）
-install -m 0755 %{_builddir}/%{name}-%{version}/usr/bin/%{name} \
-        %{buildroot}/usr/bin/%{name}
+[Install]
+WantedBy=multi-user.target
+EOF
 
-# systemd 单元
-install -m 0644 %{_builddir}/%{name}-%{version}/%{name}.service \
-        %{buildroot}/etc/systemd/system/%{name}.service
-
-# 仅编译字节码，保留源码，避免入口被删
+# 4) 仅编译字节码、保留源码（避免入口被删）
 python3 -m compileall -q -j0 %{buildroot}/opt/%{name} || :
 
-# 根据架构裁剪 wheelhouse
+# 5) 按当前架构裁剪另一套 wheelhouse（若你打了双架构轮子）
 %ifarch x86_64
 rm -rf %{buildroot}/opt/%{name}/wheelhouse_aarch64
 %endif
@@ -55,48 +102,25 @@ rm -rf %{buildroot}/opt/%{name}/wheelhouse_x86_64
 %endif
 
 %post
-# 创建 venv，并“离线优先、在线兜底”安装依赖
-set -e
-INSTALL_DIR="/opt/%{name}"
-VENV="$INSTALL_DIR/%{name}-venv"
-PY="$VENV/bin/python3"
-PIP="$VENV/bin/pip"
-
-[ -x "$PY" ] || python3 -m venv "$VENV"
-"$PY" -m ensurepip --upgrade >/dev/null 2>&1 || :
-
-case "$(uname -m)" in
-  x86_64)  WH="$INSTALL_DIR/wheelhouse_x86_64" ;;
-  aarch64) WH="$INSTALL_DIR/wheelhouse_aarch64" ;;
-  *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
-esac
-
-if [ -s "$INSTALL_DIR/requirements.txt" ]; then
-  if ! "$PIP" install --no-index --find-links="$WH" -r "$INSTALL_DIR/requirements.txt"; then
-    if [ "${KACD_OFFLINE_ONLY:-0}" -eq 1 ]; then
-      echo "Offline-only & missing wheels in $WH" >&2; exit 1
-    fi
-    "$PIP" install -r "$INSTALL_DIR/requirements.txt"
-  fi
-fi
-
-chmod 755 /usr/bin/%{name} || :
+# 安装后启用服务（如你不想起服务，可把下面三行删掉）
 systemctl daemon-reload >/dev/null 2>&1 || :
 systemctl enable %{name}.service >/dev/null 2>&1 || :
+# 不自动启动，改为管理员手动：systemctl start %{name}.service
 exit 0
 
 %preun
-# 卸载时停用服务
 if [ "$1" -eq 0 ]; then
   systemctl stop %{name}.service >/dev/null 2>&1 || :
   systemctl disable %{name}.service >/dev/null 2>&1 || :
 fi
+exit 0
 
 %postun
 systemctl daemon-reload >/dev/null 2>&1 || :
+exit 0
 
 %files
-# 先排除，后整体收录，再以 config 方式单列，避免“被列出两次”警告
+# 先排除，再整体收录，最后以 config 方式单列，避免重复告警
 %exclude /opt/%{name}/src/miner_sentinel_l1/src/config/monitoring_rules.yaml
 %exclude /opt/%{name}/src/miner_sentinel_l2/src/config/pid_whitelist.yaml
 /opt/%{name}
@@ -107,25 +131,31 @@ systemctl daemon-reload >/dev/null 2>&1 || :
 
 %changelog
 * Thu Oct 23 2025 You <you@example.com> 1.0.0-1
-- Follow colleague's concise style: copy payload, arch prune, simple scriptlets.
-- Keep .py sources; compile only.
-- Offline-first dependency install with optional online fallback (KACD_OFFLINE_ONLY=1 to forbid).
+- Create wrapper & systemd unit inside %%install to avoid missing Source0 files.
+- Keep sources; compile bytecode only.
+- Offline-first dependency install at first run; KACD_OFFLINE_ONLY=1 to forbid fallback.
 
-你的 Source0（%{name}-%{version}.tar.gz）里需要包含
+你需要确认的只有一件事
 
-opt/kylin-ai-cryptojacking-detect/：src/ 源码、requirements.txt、wheelhouse_x86_64/ 与（可选）wheelhouse_aarch64/
+Source0 压缩包里必须仍然包含你的业务目录：
+opt/kylin-ai-cryptojacking-detect/（含 src/、requirements.txt、可选的 wheelhouse_x86_64/ / wheelhouse_aarch64/）。
+其它像 /usr/bin/... 和 *.service 不再需要打进 Source0，spec 会自己生成。
 
-usr/bin/kylin-ai-cryptojacking-detect：包装启动器（内部需调用 …/python3 …/src/cryptojacking_detect.py --monitor）
+重新构建与安装
+# 1) 如果你更新了 Source0 的内容，重新打进去
+NAME=kylin-ai-cryptojacking-detect
+VER=1.0.0
+TOPDIR="$(pwd)/.rpmbuild"
+( cd packaging && tar czf "$TOPDIR/SOURCES/${NAME}-${VER}.tar.gz" "${NAME}-${VER}" )
 
-kylin-ai-cryptojacking-detect.service：systemd 单元（ExecStart=/usr/bin/kylin-ai-cryptojacking-detect）
+# 2) 构建
+rpmbuild --define "_topdir $TOPDIR" -ba ".rpmbuild/SPECS/${NAME}.spec"
 
-构建与安装（在项目根）
-# 放好 Source0 后：
-rpmbuild --define "_topdir $(pwd)/.rpmbuild" -ba .rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
+# 3) 安装
+sudo rpm -Uvh ".rpmbuild/RPMS/noarch/${NAME}-${VER}-*.noarch.rpm"
 
-# 安装
-sudo rpm -Uvh .rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.noarch.rpm
-sudo systemctl restart kylin-ai-cryptojacking-detect.service
+# 4) （可选）启动服务
+sudo systemctl start ${NAME}.service
 
 
-这样既保留了你同事那种“简洁拷贝式”的写法，又解决了你之前遇到的 .py 丢失、依赖缺失和 %files 警告问题。
+这样就彻底规避了你这次的“找不到 usr/bin 脚本/服务文件”的问题；后续即使忘了把这两个文件放进压缩包，也能稳定构建通过。如果你决定不启服务，把 %post/%preun/%postun 里涉及 systemd 的几行删掉即可。
