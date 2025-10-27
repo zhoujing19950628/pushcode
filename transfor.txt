@@ -1,22 +1,11 @@
-问题的根因很简单：
+1) 写一份“无宏”spec（不需要 pyproject-rpm-macros / redhat-rpm-config）
 
-你在拷贝 packaging/rpm/kylin-ai-cryptojacking-detect.spec 时提示 No such file or directory，说明仓库里还没有 spec；
-
-随后 builddep/rpmbuild 也就找不到 /root/rpmbuild/SPECS/...spec，于是报 “can’t parse specfile”。
-
-一步到位：先创建 spec，再打包
-
-在项目根目录执行下面整段（可直接粘贴）。它会创建 spec、重新打 Source0 源码包、安装构建依赖并开建。
-
-假设版本是 0.1.0，入口函数是 cryptojacking_detect:main；如果不同，改下面两处即可。
-
-# 在你的项目根（包含 src/ 与 pyproject.toml）
-cd /path/to/kylin-ai-cryptojacking-detect
+如果你的仓库里暂时没有 python3-pandas 这个包，请先按下面模板把它从 Requires 里删掉；以后有仓库再加回。
 
 NAME=kylin-ai-cryptojacking-detect
 VER=0.1.0
 
-# 1) 创建 spec 到 ~/rpmbuild/SPECS/
+# 把 spec 直接写到 ~/rpmbuild/SPECS/
 cat > "$HOME/rpmbuild/SPECS/${NAME}.spec" <<'SPEC'
 Name:           kylin-ai-cryptojacking-detect
 Version:        0.1.0
@@ -27,21 +16,18 @@ URL:            https://example.com/kylin-ai-cryptojacking-detect
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
-# 使用 pyproject 宏（你已安装 pyproject-rpm-macros）
-BuildRequires:  python3-devel
+# 不用 pyproject 宏；只要这些基础构建依赖
+BuildRequires:  python3
 BuildRequires:  python3-pip
+BuildRequires:  python3-setuptools
 BuildRequires:  python3-wheel
-BuildRequires:  pyproject-rpm-macros
 BuildRequires:  findutils
 BuildRequires:  coreutils
 
-%generate_buildrequires
-%pyproject_buildrequires -r
-
-# 运行时依赖（按需调整；仓库没有就先删掉该行）
+# 运行时依赖（仓库没有的先删掉）
 Requires:       python3
 Requires:       python3-psutil
-Requires:       python3-pandas
+# Requires:     python3-pandas
 Requires:       python3-pyyaml
 
 %description
@@ -51,50 +37,77 @@ A simple command-line cryptojacking detector for Linux.
 %autosetup -n %{name}-%{version}
 
 %build
-%pyproject_wheel
+# 直接用系统 python 构建 wheel；在线环境可升级工具，离线就删掉第一行
+python3 -m pip install --upgrade pip setuptools wheel build || :
+python3 -m build -w --no-isolation
 
 %install
-%pyproject_install
+# 把刚生成的 wheel 安装到构建根
+python3 -m pip install --no-deps --no-index \
+    --prefix /usr --root %{buildroot} dist/*.whl
 
-# 可编辑配置：把 YAML 放到 /etc/%{name}/（升级不覆盖用户修改）
-install -d %{buildroot}%{_sysconfdir}/%{name}
-# 按你的实际目录改路径；这里示例从 l1 收集 *.yaml/*.yml
+# 若没有自动生成 CLI，则手动放一个包装器
+if [ ! -x "%{buildroot}/usr/bin/cryptojacking-detect" ]; then
+  install -Dpm0755 /dev/stdin %{buildroot}/usr/bin/cryptojacking-detect <<'EOF'
+#!/usr/bin/python3
+from cryptojacking_detect import main
+if __name__ == "__main__":
+    raise SystemExit(main())
+EOF
+fi
+
+# 安装 YAML 到 /etc/%{name}（按你的实际路径改源目录）
+CONFIGDIR=%{buildroot}%{_sysconfdir}/%{name}
+mkdir -p "$CONFIGDIR"
 find src/miner_sentinel_l1 -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
- | xargs -0 -r install -m 0644 -t %{buildroot}%{_sysconfdir}/%{name}
+ | xargs -0 -r install -m 0644 -t "$CONFIGDIR"
 
-%files -f %{pyproject_files}
-%config(noreplace) %{_sysconfdir}/%{name}/*
+# 生成 %files 清单（先全量收集，再把 /etc 标记为配置）
+( cd %{buildroot} && find . -type f -printf "/%%P\n" | sort -u ) > installed-files.list
+if [ -d "%{buildroot}%{_sysconfdir}/%{name}" ]; then
+  awk 'BEGIN{cfg="/etc/%{name}/"} { if (index($0,cfg)==1) print "%%config(noreplace) "$0; else print $0 }' \
+      installed-files.list > installed-files.list.new && mv installed-files.list.new installed-files.list
+fi
+
+%files -f installed-files.list
 # %license LICENSE*
 # %doc README* CHANGELOG*
+
+%changelog
+* Thu Oct 23 2025 You <you@example.com> - 0.1.0-1
+- Initial RPM release without pyproject macros
 SPEC
 
-# 2) 重新打 Source0 源码包到 ~/rpmbuild/SOURCES/
+2) 打 Source0 源码包到 ~/rpmbuild/SOURCES/
 tmp=$(mktemp -d); mkdir -p "$tmp/${NAME}-${VER}"
 rsync -a --delete --exclude ".git" ./ "$tmp/${NAME}-${VER}/"
 tar -C "$tmp" -czf "$HOME/rpmbuild/SOURCES/${NAME}-${VER}.tar.gz" "${NAME}-${VER}"
 rm -rf "$tmp"
 
-# 3) （可选）自动装构建依赖
-sudo dnf -y builddep "$HOME/rpmbuild/SPECS/${NAME}.spec" || true
 
-# 4) 开建
+注意：你的源码里务必包含之前补的 src/miner_sentinel_l3/src/memory_info.py 和所有 __init__.py。
+
+3) 构建
 rpmbuild -ba "$HOME/rpmbuild/SPECS/${NAME}.spec"
 
 
-成功后，包会在：
+成功后产物在：
 
-~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.noarch.rpm
+~/rpmbuild/RPMS/noarch/${NAME}-${VER}-1.noarch.rpm
+~/rpmbuild/SRPMS/${NAME}-${VER}-1.src.rpm
 
-两个关键检查（避免再踩坑）
+4) 安装验证
+# 用 dnf/yum 安装
+sudo dnf -y install ~/rpmbuild/RPMS/noarch/${NAME}-${VER}-1.noarch.rpm \
+  || sudo yum -y localinstall ~/rpmbuild/RPMS/noarch/${NAME}-${VER}-1.noarch.rpm
 
-pyproject.toml 必须有入口脚本（这样安装后自动有 /usr/bin/cryptojacking-detect）：
+# 验证命令与配置
+which cryptojacking-detect
+cryptojacking-detect --help
+ls -l /etc/${NAME}/
 
-[project.scripts]
-cryptojacking-detect = "cryptojacking_detect:main"
+如果仍想用 %pyproject_* 宏（可选）
 
+那就需要把包含 pyproject-rpm-macros 的软件源启用（或手工安装那个 noarch RPM）。但在你的发行版里没有该包的情况下，上面的“无宏 spec”是最稳妥的路径。
 
-源码里包含所有被 import 的模块（比如你之前补的 src/miner_sentinel_l3/src/memory_info.py），并且这些目录都有 __init__.py。
-
-如果你的发行版缺少某些 python3-... 运行时包（如 python3-pandas），可先暂时删除 spec 里的那几行 Requires: 再构建，之后用 pip 或你自己的 RPM 解决依赖。
-
-再遇到报错，直接把 rpmbuild 的最后 30 行日志贴我，我帮你定位具体是哪一步（spec 语法、缺文件、依赖缺失或路径不对）。
+出新报错，把 rpmbuild 最后 30 行贴我，我再对症改一行即可。
