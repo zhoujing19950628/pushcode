@@ -1,3 +1,23 @@
+set -euo pipefail
+NAME=kylin-ai-cryptojacking-detect
+VER=0.1.0
+
+# 0) 确保子包都有 __init__.py（按你的目录树补全一次）
+touch src/miner_sentinel_l1/__init__.py \
+      src/miner_sentinel_l1/src/__init__.py \
+      src/miner_sentinel_l2/__init__.py \
+      src/miner_sentinel_l2/src/__init__.py \
+      src/miner_sentinel_l2/src/detectors/__init__.py \
+      src/miner_sentinel_l2/src/models/__init__.py \
+      src/miner_sentinel_l2/src/utils/__init__.py \
+      src/miner_sentinel_l3/__init__.py \
+      src/miner_sentinel_l3/src/__init__.py
+
+# 1) 项目内 rpmbuild 树 + 产物目录
+mkdir -p .rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} dist
+
+# 2) 写 spec 到 .rpmbuild/SPECS/${NAME}.spec
+cat > .rpmbuild/SPECS/${NAME}.spec <<'SPEC'
 Name:           kylin-ai-cryptojacking-detect
 Version:        0.1.0
 Release:        1%{?dist}
@@ -7,7 +27,6 @@ URL:            http://www.kylinos.cn
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
-# 关闭自动 .pyc，避免“未打包文件”错误
 %undefine __brp_python_bytecompile
 %global _python_bytecompile 0
 
@@ -18,9 +37,6 @@ BuildRequires:  findutils
 Requires:       python3
 Requires:       python3-psutil
 Requires:       python3-pyyaml
-# 如果你的代码真的用到再加：
-# Requires:    python3-numpy
-# Requires:    python3-pandas
 
 %description
 Kylin AI cryptojacking detection tool for Linux.
@@ -29,15 +45,13 @@ Kylin AI cryptojacking detection tool for Linux.
 %autosetup -n %{name}-%{version}
 
 %build
-# 纯 Python，无需编译
+# pure Python
 
 %install
-# 代码安装到 /usr/libexec/<name>，运行时由启动器注入 PYTHONPATH
 APPDIR=%{buildroot}%{_libexecdir}/%{name}
 install -d "$APPDIR"
 cp -a src/* "$APPDIR/"
 
-# 配置文件安装到 /etc/<name>
 CFGDIR=%{buildroot}%{_sysconfdir}/%{name}
 install -d "$CFGDIR"
 test -d src/miner_sentinel_l1/src/config && \
@@ -47,7 +61,6 @@ test -d src/miner_sentinel_l2/src/config && \
   find src/miner_sentinel_l2/src/config -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
   | xargs -0 -r install -m0644 -t "$CFGDIR"
 
-# /usr/bin 启动器（把 APPDIR 加入 PYTHONPATH，执行你的主脚本）
 install -Dpm0755 /dev/stdin %{buildroot}%{_bindir}/cryptojacking-detect <<'EOF'
 #!/bin/sh
 APPDIR="/usr/libexec/kylin-ai-cryptojacking-detect"
@@ -55,7 +68,6 @@ export PYTHONPATH="$APPDIR${PYTHONPATH:+:$PYTHONPATH}"
 exec /usr/bin/python3 "$APPDIR/cryptojacking_detect.py" "$@"
 EOF
 
-# 生成 %files 清单并标记配置文件
 ( cd %{buildroot} && find . -type f -printf "/%P\n" | sort -u ) > installed-files.list
 awk 'BEGIN{cfg="/etc/%{name}/"} { if (index($0,cfg)==1) print "%config(noreplace) "$0; else print $0 }' \
     installed-files.list > installed-files.list.new && mv installed-files.list.new installed-files.list
@@ -64,43 +76,31 @@ awk 'BEGIN{cfg="/etc/%{name}/"} { if (index($0,cfg)==1) print "%config(noreplace
 
 %changelog
 * Mon Oct 27 2025 You <you@example.com> 0.1.0-1
-- First in-repo build; outputs to ./dist and ./.rpmbuild
+- In-repo build; outputs to ./dist and ./.rpmbuild
+SPEC
 
-----------------------
-
-#!/usr/bin/env bash
-set -euo pipefail
-
-NAME=kylin-ai-cryptojacking-detect
-VER=0.1.0
-
-# 1) 准备 in-repo rpmbuild 树 & dist 目录
-mkdir -p .rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} dist packaging/rpm
-
-# 2) 放 spec（你已经放在 packaging/rpm/ 了）
-cp -f packaging/rpm/${NAME}.spec .rpmbuild/SPECS/${NAME}.spec
-
-# 3) 打 Source0（以 Name-Version 为顶层目录）
+# 3) 打 Source0：顶层必须是 Name-Version
 TMP="$(mktemp -d)"
 STAGE="$TMP/${NAME}-${VER}"
 mkdir -p "$STAGE"
-# 拷项目内容到临时 staging；排除构建产物自身
 rsync -a --delete \
   --exclude ".git" --exclude ".rpmbuild" --exclude "dist" \
   ./ "$STAGE/"
-
 tar -C "$TMP" -czf ".rpmbuild/SOURCES/${NAME}-${VER}.tar.gz" "${NAME}-${VER}"
 rm -rf "$TMP"
 
-# 4) 构建（topdir 指向项目内）
+# 4) 构建（使用项目内的 _topdir）
 rpmbuild --define "_topdir $PWD/.rpmbuild" -ba ".rpmbuild/SPECS/${NAME}.spec"
 
-# 5) 收集产物到 dist/
+# 5) 产物收集到 dist/
 cp -av .rpmbuild/RPMS/*/*.rpm dist/ 2>/dev/null || true
 cp -av .rpmbuild/SRPMS/*.src.rpm dist/ 2>/dev/null || true
 cp -av .rpmbuild/SOURCES/${NAME}-${VER}.tar.gz dist/ 2>/dev/null || true
 
-echo
-echo "✅ 构建完成，产物在 ./dist/ ："
+echo "✅ 完成。产物在 ./dist ："
 ls -l dist/
 
+-----------------------------------------------
+sudo dnf -y remove kylin-ai-cryptojacking-detect || true
+sudo dnf -y install ./dist/kylin-ai-cryptojacking-detect-*.noarch.rpm
+cryptojacking-detect --help
