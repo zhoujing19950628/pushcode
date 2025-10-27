@@ -50,4 +50,28 @@ cryptojacking-detect --help
 ls -l /etc/kylin-ai-cryptojacking-detect/
 
 
-如果你按方案 A 改了还是报别的“未打包”文件，把 rpmbuild 的最后 30 行日志贴过来（尤其是报错前的 “Processing files:” 和 “Checking for unpackaged file(s)” 两段），我帮你把对应的 %files 或宏再对上一下。
+----------------------------------------------------------
+构建其实成功了，只是你安装时用的文件名不对。
+
+在日志里可以看到 rpmbuild 写出了：
+
+/root/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.kyll.noarch.rpm
+
+
+注意中间有个 .kyll（这是 %{?dist} 展开出的发行版后缀）。你安装时用了 …-1.noarch.rpm，自然找不到。
+
+这样安装就行
+# 先确认文件名
+ls -l ~/rpmbuild/RPMS/noarch/
+
+# 精确安装（包含 .kyll 后缀）
+sudo dnf -y install ~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-0.1.0-1.kyll.noarch.rpm
+
+# 或者用通配，自动取最新那一个
+RPM=$(ls -1t ~/rpmbuild/RPMS/noarch/kylin-ai-cryptojacking-detect-*.noarch.rpm | head -n1)
+sudo dnf -y install "$RPM"
+
+验证
+which cryptojacking-detect
+cryptojacking-detect --help
+rpm -ql kylin-ai-cryptojacking-detect | head
