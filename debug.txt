@@ -1,62 +1,32 @@
-可以的，不需要 pyproject.toml。你完全可以只写一个 .spec 就把项目打成 RPM。思路是：在 %install 里把你的 src/ 代码直接复制到 Python 的 site-packages，再手动放一个 /usr/bin/cryptojacking-detect 的启动脚本，最后生成 %files 清单。
+一步修复：同时安装到 purelib 和 platlib
 
-下面给你一份不依赖 pyproject 宏、也不走 pip 的最小可用 .spec，复制即可用。
-
-1) 最小可用 .spec（纯手工安装，适配任何 RPM 系）
-
-保存为：~/rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
-你需要的源码结构：
-src/cryptojacking_detect.py（里面有 def main()）
-src/miner_sentinel_l1/...、src/miner_sentinel_l2/...、src/miner_sentinel_l3/...（这些目录要有 __init__.py；l3/src/memory_info.py 记得补齐）
-
-Name:           kylin-ai-cryptojacking-detect
-Version:        0.1.0
-Release:        1%{?dist}
-Summary:        Cryptojacking detector (Python CLI)
-License:        MIT
-URL:            https://example.com/kylin-ai-cryptojacking-detect
-Source0:        %{name}-%{version}.tar.gz
-BuildArch:      noarch
-
-# 关掉自动 .pyc 生成，避免“已安装但未打包的文件”错误
-%undefine __brp_python_bytecompile
-%global _python_bytecompile 0
-
-# 这里只要最基础依赖；不使用 pyproject 宏，不要求 redhat-rpm-config
-BuildRequires:  python3
-BuildRequires:  findutils
-BuildRequires:  coreutils
-
-# 运行时依赖（仓库没有就先删掉相应行）
-Requires:       python3
-Requires:       python3-psutil
-#Requires:      python3-pandas
-Requires:       python3-pyyaml
-
-%description
-A simple command-line cryptojacking detector for Linux.
-
-%prep
-%autosetup -n %{name}-%{version}
-
-%build
-# 纯 Python，无需编译
+把你的 spec 的 %install 段换成下面这一段（它会计算出两个可能的目录并复制到位，从而兼容 /usr/lib 与 /usr/lib64 以及 /usr/local 差异），其它内容不变：
 
 %install
-# 计算 Python 安装纯库目录（site-packages）
-SITELIB=$(/usr/bin/python3 - <<'PY'
-import sysconfig; print(sysconfig.get_paths()["purelib"])
+# 计算 Python 3 的纯 Python 路径(purelib) 和 平台相关路径(platlib)
+PYTHON=/usr/bin/python3
+PURELIB=$($PYTHON - <<'PY'
+import sysconfig; print(sysconfig.get_path('purelib'))
+PY
+)
+PLATLIB=$($PYTHON - <<'PY'
+import sysconfig; print(sysconfig.get_path('platlib'))
 PY
 )
 
-# 1) 安装你的 Python 源码到 site-packages
-mkdir -p "%{buildroot}${SITELIB}"
-# 主入口模块（确保 src/cryptojacking_detect.py 存在且有 main()）
-install -m 0644 src/cryptojacking_detect.py "%{buildroot}${SITELIB}/"
-# 三个包目录（都要有 __init__.py）
-cp -a src/miner_sentinel_l1 src/miner_sentinel_l2 src/miner_sentinel_l3 "%{buildroot}${SITELIB}/"
+copy_to() {
+  d="$1"; [ -z "$d" ] && return
+  mkdir -p "%{buildroot}$d"
+  # 主入口模块（确保仓库里有 src/cryptojacking_detect.py 且包含 main()）
+  install -m 0644 src/cryptojacking_detect.py "%{buildroot}$d/" || exit 1
+  # 三个包目录（目录中要有 __init__.py；l3 里要有 src/memory_info.py）
+  cp -a src/miner_sentinel_l1 src/miner_sentinel_l2 src/miner_sentinel_l3 "%{buildroot}$d/" || exit 1
+}
+# 装到 purelib；若 platlib 与 purelib 不同，再装一次到 platlib
+copy_to "$PURELIB"
+[ "$PLATLIB" != "$PURELIB" ] && copy_to "$PLATLIB"
 
-# 2) 安装可执行脚本（手动包装，不依赖 console_scripts）
+# 可执行脚本（手工包装，不依赖 console_scripts）
 install -Dpm0755 /dev/stdin %{buildroot}%{_bindir}/cryptojacking-detect <<'EOF'
 #!/usr/bin/python3
 from cryptojacking_detect import main
@@ -64,55 +34,48 @@ if __name__ == "__main__":
     raise SystemExit(main())
 EOF
 
-# 3) 把 l1 里的 YAML 装到 /etc，可编辑、升级不覆盖
+# 把 l1 的 YAML 放到 /etc/，升级不覆盖用户修改
 install -d %{buildroot}%{_sysconfdir}/%{name}
 find src/miner_sentinel_l1 -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
   | xargs -0 -r install -m 0644 -t %{buildroot}%{_sysconfdir}/%{name}
 
-# 4) 生成 %files 清单（全量收集，再把 /etc 标为配置）
+# 生成 %files 清单
 ( cd %{buildroot} && find . -type f -printf "/%P\n" | sort -u ) > installed-files.list
 awk 'BEGIN{cfg="/etc/%{name}/"} { if (index($0,cfg)==1) print "%config(noreplace) "$0; else print $0 }' \
     installed-files.list > installed-files.list.new && mv installed-files.list.new installed-files.list
 
-%files -f installed-files.list
 
-%changelog
-* Thu Oct 23 2025 You <you@example.com> - 0.1.0-1
-- Initial RPM (no pyproject / no pip)
+说明
 
-2) 打源码包并构建
+有的发行版 purelib 是 /usr/lib/python3.X/site-packages，有的是 /usr/lib64/...，也可能是 /usr/local/lib/...。上面做法两边都覆盖，Python 无论取哪个都会找到。
 
-在你的项目根目录执行（VER 与上面 spec 的 Version 一致）：
+你之前之所以“安装成功但运行导入失败”，基本就是装到不在 sys.path 的那个目录了。
 
-NAME=kylin-ai-cryptojacking-detect
-VER=0.1.0
-
-# 打 Source0 到 ~/rpmbuild/SOURCES（注意顶层目录名必须是 Name-Version）
+重建并验证
+# 1) 重新打 Source0（在项目根）
+NAME=kylin-ai-cryptojacking-detect; VER=0.1.0
 tmp=$(mktemp -d); mkdir -p "$tmp/${NAME}-${VER}"
 rsync -a --delete --exclude ".git" ./ "$tmp/${NAME}-${VER}/"
 tar -C "$tmp" -czf "$HOME/rpmbuild/SOURCES/${NAME}-${VER}.tar.gz" "${NAME}-${VER}"
 rm -rf "$tmp"
 
-# 构建
+# 2) 重建
 rpmbuild -ba "$HOME/rpmbuild/SPECS/${NAME}.spec"
 
-
-成功后包在：
-
-~/rpmbuild/RPMS/noarch/${NAME}-${VER}-*.noarch.rpm
-
-3) 安装与验证
+# 3) 安装最新包
 RPM=$(ls -1t ~/rpmbuild/RPMS/noarch/${NAME}-${VER}-*.noarch.rpm | head -n1)
 sudo dnf -y install "$RPM" || sudo yum -y localinstall "$RPM"
 
+# 4) 验证
 which cryptojacking-detect
 cryptojacking-detect --help
-rpm -ql ${NAME} | head
 
-什么时候需要 pyproject.toml？
-
-想用 标准 Python 打包（wheel/sdist）、自动生成 console_scripts、在不同平台上统一构建时，它很方便。
-
-但不是必须。像上面这样直接把代码拷到 site-packages 并手写可执行脚本，也能干净地完成打包。
-
-如果你按这份 spec 走仍有报错，把 rpmbuild 最后的 30 行日志贴过来（尤其是 “Checking for unpackaged file(s)” 那段），我会根据错误点对 %files 或路径做微调。
+# 如还不放心，列出包里 cryptojacking_detect.py 的真实安装位置
+rpm -ql ${NAME} | grep -E 'site-packages/.*/cryptojacking_detect\.py'
+# 以及 Python 的搜索路径
+python3 - <<'PY'
+import sys, sysconfig, pprint
+print("purelib:", sysconfig.get_path('purelib'))
+print("platlib:", sysconfig.get_path('platlib'))
+pprint.pp(sys.path)
+PY
