@@ -104,3 +104,47 @@ ls -l dist/
 sudo dnf -y remove kylin-ai-cryptojacking-detect || true
 sudo dnf -y install ./dist/kylin-ai-cryptojacking-detect-*.noarch.rpm
 cryptojacking-detect --help
+
+
+
+error: .spec: line 51: %P: 预期为参数 —— 是 RPM 把 find -printf "/%P\n" 里的 %P 当成了宏，结果解析失败。
+
+修复办法
+
+把 spec 里生成文件清单那一行的 %P 转义成 %%P。
+
+一键修补
+
+在你的项目根执行：
+
+sed -i 's%-printf "/%P\\n"%-printf "/%%P\\n"%' .rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
+
+
+如果你的包名不一样，把文件名替换一下就行。
+
+为什么会这样？
+
+在 spec 中，任何以 % 开头的内容都会被 RPM 当作“宏”处理；%P 不是定义好的宏，于是报“预期为参数”。
+
+GNU find 的 -printf 里 %P 是“去掉前导 ./ 的路径”，所以我们需要写成 %%P 让 RPM 放过它，交给 find。
+
+重新构建
+rpmbuild --define "_topdir $PWD/.rpmbuild" -ba .rpmbuild/SPECS/kylin-ai-cryptojacking-detect.spec
+
+如果仍然报错（可选备用写法）
+
+不用 -printf，改用 sed 也可以生成清单（避免任何 %）——把 spec 中这两行：
+
+( cd %{buildroot} && find . -type f -printf "/%P\n" | sort -u ) > installed-files.list
+awk 'BEGIN{cfg="/etc/%{name}/"} { if (index($0,cfg)==1) print "%config(noreplace) "$0; else print $0 }' \
+    installed-files.list > installed-files.list.new && mv installed-files.list.new installed-files.list
+
+
+替换为：
+
+( cd %{buildroot} && find . -type f | sed 's|^\./|/|' | sort -u ) > installed-files.list
+awk 'BEGIN{cfg="/etc/%{name}/"} { if (index($0,cfg)==1) print "%config(noreplace) "$0; else print $0 }' \
+    installed-files.list > installed-files.list.new && mv installed-files.list.new installed-files.list
+
+
+这样就完全没有 %，也不会触发宏解析。
