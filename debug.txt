@@ -1,191 +1,106 @@
-太好了，有了这棵目录树，我们就按你 leader 的“/opt + venv + systemd”的套路把它一次性打成 RPM（不需要 wheelhouse，在线装依赖）。
-
-下面整段命令从零走到包，可直接复制在你的项目根（~/Downloads/kylin-ai-cryptojacking-detect）执行：
-
-A) 准备打包用的 Source0（把源码放进 /opt 结构）
-set -e
-NAME=kylin-ai-cryptojacking-detect
-VER=0.1.0
-
-# 1) 补齐 __init__.py（确保能 import）
-touch src/miner_sentinel_l1/__init__.py 2>/dev/null || true
-touch src/miner_sentinel_l1/src/__init__.py 2>/dev/null || true
-touch src/miner_sentinel_l1/src/status_monitor/__init__.py 2>/dev/null || true
-
-touch src/miner_sentinel_l2/__init__.py 2>/dev/null || true
-touch src/miner_sentinel_l2/src/__init__.py 2>/dev/null || true
-touch src/miner_sentinel_l2/src/detectors/__init__.py 2>/dev/null || true
-touch src/miner_sentinel_l2/src/models/__init__.py 2>/dev/null || true
-touch src/miner_sentinel_l2/src/utils/__init__.py 2>/dev/null || true
-
-touch src/miner_sentinel_l3/__init__.py 2>/dev/null || true
-touch src/miner_sentinel_l3/src/__init__.py 2>/dev/null || true
-
-# 2) 在临时目录构造 Source0：顶层必须是 Name-Version
-TMP=$(mktemp -d)
-STAGE="$TMP/${NAME}-${VER}"
-mkdir -p "$STAGE/opt/${NAME}" "$STAGE/usr/local/bin"
-
-# 3) 复制你的源码到 /opt/<name>（保持你现在的 src 结构）
-cp -a src/* "$STAGE/opt/${NAME}/"
-
-# 4) 写 requirements.txt（按需增减依赖）
-cat > "$STAGE/opt/${NAME}/requirements.txt" <<'REQ'
-psutil
-PyYAML
-# 如果代码真的用到再加：
-# numpy
-# pandas
-REQ
-
-# 5) 写 CLI 包装器：使用 venv 的 python 并加 PYTHONPATH 指向 /opt/<name>
-cat > "$STAGE/usr/local/bin/${NAME}" <<'SH'
-#!/bin/sh
-INSTALL_DIR="/opt/kylin-ai-cryptojacking-detect"
-VENV="$INSTALL_DIR/kylin-ai-cryptojacking-detect-venv"
-export PYTHONPATH="$INSTALL_DIR${PYTHONPATH:+:$PYTHONPATH}"
-exec "$VENV/bin/python" -c 'import sys; from cryptojacking_detect import main; sys.exit(main())' "$@"
-SH
-chmod +x "$STAGE/usr/local/bin/${NAME}"
-
-# 6) 写 systemd 单元（按需把 --daemon 换成你程序实际参数）
-cat > "$STAGE/${NAME}.service" <<'UNIT'
-[Unit]
-Description=Kylin AI Cryptojacking Detector
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/kylin-ai-cryptojacking-detect --help
-WorkingDirectory=/opt/kylin-ai-cryptojacking-detect
-Restart=on-failure
-User=root
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-# 7) 打 Source0 到 ~/rpmbuild/SOURCES/
-tar -C "$TMP" -czf "$HOME/rpmbuild/SOURCES/${NAME}-${VER}.tar.gz" "${NAME}-${VER}"
-rm -rf "$TMP"
-echo "Source0: $HOME/rpmbuild/SOURCES/${NAME}-${VER}.tar.gz"
-
-
-说明
-
-我们把你的 src/ 原样放进 /opt/kylin-ai-cryptojacking-detect/，运行时通过 PYTHONPATH 保证 import miner_sentinel_* 和 import cryptojacking_detect 都能找到。
-
-依赖用 requirements.txt + venv 在线安装（无 wheelhouse）。
-
-systemd 的 ExecStart 我先放了 --help 以便你验证能启动；真实运行换成你的实际参数（比如 --daemon）。
-
-B) 写 spec（安装到 /opt + venv + systemd，在线 pip 装依赖）
-cat > "$HOME/rpmbuild/SPECS/${NAME}.spec" <<'SPEC'
 Name:           kylin-ai-cryptojacking-detect
 Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Kylin AI Cryptojacking Detection Tool
-License:        Non open source, The copyright belongs to KylinSoft Co., Ltd.
+License:        MIT
 URL:            http://www.kylinos.cn
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
-Requires:       python3 >= 3.6
-Requires:       systemd
+# 关闭自动 .pyc，避免“未打包文件”错误
+%undefine __brp_python_bytecompile
+%global _python_bytecompile 0
+
+BuildRequires:  python3
+BuildRequires:  coreutils
+BuildRequires:  findutils
+
+Requires:       python3
+Requires:       python3-psutil
+Requires:       python3-pyyaml
+# 如果你的代码真的用到再加：
+# Requires:    python3-numpy
+# Requires:    python3-pandas
 
 %description
 Kylin AI cryptojacking detection tool for Linux.
 
 %prep
-%setup -q
+%autosetup -n %{name}-%{version}
+
+%build
+# 纯 Python，无需编译
 
 %install
-rm -rf %{buildroot}
-mkdir -p %{buildroot}/opt/%{name}
-mkdir -p %{buildroot}/etc/systemd/system
-mkdir -p %{buildroot}/usr/local/bin
+# 代码安装到 /usr/libexec/<name>，运行时由启动器注入 PYTHONPATH
+APPDIR=%{buildroot}%{_libexecdir}/%{name}
+install -d "$APPDIR"
+cp -a src/* "$APPDIR/"
 
-# 拷贝程序主体（来自 Source0）
-cp -r %{_builddir}/%{name}-%{version}/opt/%{name}/* %{buildroot}/opt/%{name}/
+# 配置文件安装到 /etc/<name>
+CFGDIR=%{buildroot}%{_sysconfdir}/%{name}
+install -d "$CFGDIR"
+test -d src/miner_sentinel_l1/src/config && \
+  find src/miner_sentinel_l1/src/config -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
+  | xargs -0 -r install -m0644 -t "$CFGDIR"
+test -d src/miner_sentinel_l2/src/config && \
+  find src/miner_sentinel_l2/src/config -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
+  | xargs -0 -r install -m0644 -t "$CFGDIR"
 
-# 拷贝 systemd 服务与 CLI
-install -m 0644 %{_builddir}/%{name}-%{version}/%{name}.service %{buildroot}/etc/systemd/system/%{name}.service
-install -m 0755 %{_builddir}/%{name}-%{version}/usr/local/bin/%{name} %{buildroot}/usr/local/bin/%{name}
-
-# （可选）预编译 .py -> .pyc，再保留 .py 以便调试
-# find %{buildroot}/opt/%{name} -name "*.py" -exec python3 -m py_compile {} +
-
-%post
+# /usr/bin 启动器（把 APPDIR 加入 PYTHONPATH，执行你的主脚本）
+install -Dpm0755 /dev/stdin %{buildroot}%{_bindir}/cryptojacking-detect <<'EOF'
 #!/bin/sh
-set -e
-INSTALL_DIR="/opt/%{name}"
-VENV_PATH="$INSTALL_DIR/%{name}-venv"
-python3 -m venv "$VENV_PATH" || exit 1
-"$VENV_PATH/bin/pip" install -U pip || :
-# 在线安装依赖；若需离线，把这行改成 --no-index --find-links=<wheelhouse>
-"$VENV_PATH/bin/pip" install -r "$INSTALL_DIR/requirements.txt" || exit 1
-chmod 0755 /usr/local/bin/%{name} || :
-systemctl daemon-reload >/dev/null 2>&1 || :
-systemctl enable %{name}.service >/dev/null 2>&1 || :
-exit 0
+APPDIR="/usr/libexec/kylin-ai-cryptojacking-detect"
+export PYTHONPATH="$APPDIR${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 "$APPDIR/cryptojacking_detect.py" "$@"
+EOF
 
-%preun
-#!/bin/sh
-if [ "$1" -eq 0 ]; then
-    systemctl stop %{name}.service >/dev/null 2>&1 || :
-    systemctl disable %{name}.service >/devnull 2>&1 || :
-    rm -rf "/opt/%{name}/%{name}-venv"
-fi
-exit 0
+# 生成 %files 清单并标记配置文件
+( cd %{buildroot} && find . -type f -printf "/%P\n" | sort -u ) > installed-files.list
+awk 'BEGIN{cfg="/etc/%{name}/"} { if (index($0,cfg)==1) print "%config(noreplace) "$0; else print $0 }' \
+    installed-files.list > installed-files.list.new && mv installed-files.list.new installed-files.list
 
-%postun
-#!/bin/sh
-if [ "$1" -ge 1 ]; then
-    systemctl daemon-reload >/dev/null 2>&1 || :
-fi
-exit 0
-
-%files
-/opt/%{name}
-/usr/local/bin/%{name}
-/etc/systemd/system/%{name}.service
+%files -f installed-files.list
 
 %changelog
 * Mon Oct 27 2025 You <you@example.com> 0.1.0-1
-- first release (/opt + venv + systemd, online deps)
-SPEC
+- First in-repo build; outputs to ./dist and ./.rpmbuild
 
-C) 构建 & 安装 & 验证
-# 构建
-rpmbuild -ba "$HOME/rpmbuild/SPECS/${NAME}.spec"
+----------------------
 
-# 安装（注意发行版后缀，建议用通配取最新）
-RPM=$(ls -1t ~/rpmbuild/RPMS/noarch/${NAME}-${VER}-*.noarch.rpm | head -n1)
-sudo dnf -y install "$RPM" || sudo yum -y localinstall "$RPM"
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 先手动跑 CLI 看 import 是否正常
-/usr/local/bin/${NAME} --help
+NAME=kylin-ai-cryptojacking-detect
+VER=0.1.0
 
-# 启动服务测试（ExecStart 目前用的是 --help，能起即可）
-sudo systemctl daemon-reload
-sudo systemctl start ${NAME}.service
-sudo systemctl status ${NAME}.service --no-pager
+# 1) 准备 in-repo rpmbuild 树 & dist 目录
+mkdir -p .rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} dist packaging/rpm
 
-常见坑位对照
+# 2) 放 spec（你已经放在 packaging/rpm/ 了）
+cp -f packaging/rpm/${NAME}.spec .rpmbuild/SPECS/${NAME}.spec
 
-ModuleNotFoundError: cryptojacking_detect
-检查这两个：
+# 3) 打 Source0（以 Name-Version 为顶层目录）
+TMP="$(mktemp -d)"
+STAGE="$TMP/${NAME}-${VER}"
+mkdir -p "$STAGE"
+# 拷项目内容到临时 staging；排除构建产物自身
+rsync -a --delete \
+  --exclude ".git" --exclude ".rpmbuild" --exclude "dist" \
+  ./ "$STAGE/"
 
-ls -l /opt/${NAME}/cryptojacking_detect.py
-PYTHONPATH=/opt/${NAME} python3 -c 'import cryptojacking_detect as m; print(m.__file__)'
+tar -C "$TMP" -czf ".rpmbuild/SOURCES/${NAME}-${VER}.tar.gz" "${NAME}-${VER}"
+rm -rf "$TMP"
 
+# 4) 构建（topdir 指向项目内）
+rpmbuild --define "_topdir $PWD/.rpmbuild" -ba ".rpmbuild/SPECS/${NAME}.spec"
 
-如果存在且能 import，说明包装器/服务里 PYTHONPATH 就会生效。
+# 5) 收集产物到 dist/
+cp -av .rpmbuild/RPMS/*/*.rpm dist/ 2>/dev/null || true
+cp -av .rpmbuild/SRPMS/*.src.rpm dist/ 2>/dev/null || true
+cp -av .rpmbuild/SOURCES/${NAME}-${VER}.tar.gz dist/ 2>/dev/null || true
 
-miner_sentinel_ import 失败*
-确保那些目录有 __init__.py（上面脚本已 touch），并且都在 /opt/${NAME}/ 下面。
+echo
+echo "✅ 构建完成，产物在 ./dist/ ："
+ls -l dist/
 
-requirements 装不上
-在线环境确保能访问 PyPI；若离线，就按我上一条消息的“wheelhouse 方案 B”准备离线 whl，把 %post 那行 pip 改成 --no-index --find-links=...。
-
-如果你想让服务真正“常驻运行”，把 systemd 单元里的 ExecStart 改成你实际的运行参数（比如 --daemon 或你的主循环），我可以帮你一起改；先用 --help 只是为了快速验证 import 和环境没问题。
